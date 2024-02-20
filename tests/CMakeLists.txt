@@ -28,6 +28,19 @@ target_link_libraries(
   common
 )
 
+
+add_executable(
+  test_omapavl
+  omap_avl.cpp
+)
+target_compile_definitions(test_omap PRIVATE BOOST_STACKTRACE_USE_ADDR2LINE)
+target_link_libraries(
+  test_omap
+  dl
+  gtest_main
+  common
+)
+
 add_executable(
   test_basic
   basic.cpp
