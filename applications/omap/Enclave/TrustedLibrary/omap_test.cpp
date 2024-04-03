@@ -502,7 +502,8 @@ void testEncryptPerf() {
   }
   ocall_measure_time(&end);
   uint64_t timediff = end - start;
-  printf("encrypt + decrypt %f us\n", (double)timediff * 1e-3 / (double)round);
+  printf("encrypt + decrypt %lu bytes data: %f us\n", size,
+         (double)timediff * 1e-3 / (double)round);
 }
 
 void testORAMReadWrite() {
@@ -702,7 +703,7 @@ void testOMapPerf() {
   printf("oram erase time %f us\n", (double)timediff * 1e-3 / (double)round);
 }
 
-void testOHashMapPerf(size_t mapSize = 1e6) {
+void testOHashMapPerf(size_t mapSize = 2e7) {
   size_t round = 1e5;
   size_t initSize = mapSize;
   printf("default heap size %lu\n", DEFAULT_HEAP_SIZE);
@@ -910,7 +911,7 @@ void testParOMapPerfDeferWriteBack(size_t mapSize = 5e6,
   // printf("init omap of size %lu\n", mapSize);
   ocall_measure_time(&start);
   // omap.InitFromReader(reader);
-  omap.Init();
+  omap.Init(DEFAULT_HEAP_SIZE / 2);
   ocall_measure_time(&end);
   uint64_t initTimediff = end - start;
   for (uint32_t batchSize :
@@ -1037,6 +1038,44 @@ void ecall_omap() {
   return;
 }
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <sgx_urts.h>
+#include <sgx_error.h>
+#include "sgx_trts_exception.h"
+#include "sgx_trts.h"
+// Custom exception handler function
+int custom_exception_handler(sgx_exception_info_t *info) {
+  // if (info->exception_vector == SGX_EXCEPTION_VECTOR_PF) {
+    // abort();
+  // }
+  // if (info->exception_vector == SGX_EXCEPTION_VECTOR_AC) {
+  abort();
+  // }
+  return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+void test_page_fault_handler() {
+  if (sgx_register_exception_handler(1, custom_exception_handler) == NULL) {
+    printf("exception handler failed\n");
+  } else {
+    printf("exception handler register succeed\n");
+  }
+  // int i = 1 / 0;
+  // printf("%d\n", i);
+  // std::vector<int>* nullArr = NULL;
+  // printf("%d\n", (*nullArr)[0]);
+  printf("Allocate array of size %lu bytes\n", DEFAULT_HEAP_SIZE);
+  std::vector<uint8_t> bigData(DEFAULT_HEAP_SIZE, 0);
+  for (size_t i = 0; i < DEFAULT_HEAP_SIZE; ++i) {
+    bigData[i] = (uint8_t)i;
+  }
+  for (size_t i = 0; i < DEFAULT_HEAP_SIZE; ++i) {
+    bigData[i] = (uint8_t)(i+1);
+  }
+}
+
+
 void ecall_omap_perf() {
   if (EM::Backend::g_DefaultBackend) {
     delete EM::Backend::g_DefaultBackend;
@@ -1047,11 +1086,11 @@ void ecall_omap_perf() {
   try {
     // testOmpSpeedup();
     // testParOMapPerfDiffCond();
-    // testParOMapPerf(5e6, 32);
-    // testParOMapPerfDeferWriteBack(5e6, 32);
-    testOHashMapPerf();
+    // testParOMapPerf(5e6, 4);
+    // testParOMapPerfDeferWriteBack(5e6, 4);
+    // testOHashMapPerf();
+    test_page_fault_handler();
     // testEncrypted<4096>();
-    // testEncryptPerf<4096>();
     // testOHashMapPerfDiffCond();
     // testRecursiveORAMPerf();
     // testOMapPerf();
