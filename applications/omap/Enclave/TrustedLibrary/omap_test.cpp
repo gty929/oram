@@ -1044,20 +1044,27 @@ void ecall_omap() {
 #include <sgx_error.h>
 #include "sgx_trts_exception.h"
 #include "sgx_trts.h"
+#include <sgx_trts_aex.h>
 // Custom exception handler function
-int custom_exception_handler(sgx_exception_info_t *info) {
+static void custom_exception_handler(const sgx_exception_info_t *info, const void * args) {
   // if (info->exception_vector == SGX_EXCEPTION_VECTOR_PF) {
     // abort();
   // }
   // if (info->exception_vector == SGX_EXCEPTION_VECTOR_AC) {
   abort();
   // }
-  return EXCEPTION_CONTINUE_EXECUTION;
 }
 
 void test_page_fault_handler() {
-  if (sgx_register_exception_handler(1, custom_exception_handler) == NULL) {
-    printf("exception handler failed\n");
+  const char*args = NULL;
+  sgx_aex_mitigation_node_t node;
+  // if (sgx_register_exception_handler(1, custom_exception_handler) == NULL) {
+  //   printf("exception handler failed\n");
+  // } else {
+  //   printf("exception handler register succeed\n");
+  // }
+  if (sgx_register_aex_handler(&node, custom_exception_handler, (const void*)args) != SGX_SUCCESS) {
+    printf("exception handler failed\n"); 
   } else {
     printf("exception handler register succeed\n");
   }
