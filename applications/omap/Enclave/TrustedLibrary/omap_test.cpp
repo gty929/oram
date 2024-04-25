@@ -1045,13 +1045,16 @@ void ecall_omap() {
 #include "sgx_trts_exception.h"
 #include "sgx_trts.h"
 #include <sgx_trts_aex.h>
+
+static int exception_detected = 0;
+
 // Custom exception handler function
 static void custom_exception_handler(const sgx_exception_info_t *info, const void * args) {
   // if (info->exception_vector == SGX_EXCEPTION_VECTOR_PF) {
     // abort();
   // }
   // if (info->exception_vector == SGX_EXCEPTION_VECTOR_AC) {
-  abort();
+  exception_detected++;
   // }
 }
 
@@ -1074,12 +1077,18 @@ void test_page_fault_handler() {
   // printf("%d\n", (*nullArr)[0]);
   printf("Allocate array of size %lu bytes\n", DEFAULT_HEAP_SIZE);
   std::vector<uint8_t> bigData(DEFAULT_HEAP_SIZE, 0);
+  printf("Exception detected: %d\n", exception_detected);
+  printf("First loop\n");
   for (size_t i = 0; i < DEFAULT_HEAP_SIZE; ++i) {
     bigData[i] = (uint8_t)i;
   }
+  printf("Exception detected: %d\n", exception_detected);
+  printf("Second loop\n");
   for (size_t i = 0; i < DEFAULT_HEAP_SIZE; ++i) {
     bigData[i] = (uint8_t)(i+1);
   }
+  printf("Exception detected: %d\n", exception_detected);
+  printf("Done\n");
 }
 
 
