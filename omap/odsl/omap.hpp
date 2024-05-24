@@ -1,4 +1,5 @@
 #pragma once
+#include "page_oram.hpp"
 #include "recursive_oram.hpp"
 
 /// @brief This file implements an oblivious unordered map. The position map is
@@ -178,7 +179,8 @@ struct OPosMapBucket {
  * @tparam parallel_init whether to initialize the two hash tables in parallel
  */
 template <typename K, typename PositionType = uint64_t,
-          const bool isOblivious = true, const bool parallel_init = true>
+          const ObliviousLevel obliLevel = FULL_OBLIVIOUS,
+          const bool parallel_init = true>
 struct OPosMap {
   using V = PositionType;   // value type is the position
   using H = uint32_t;       // additional hash bits to distinguish elements
@@ -189,6 +191,7 @@ struct OPosMap {
   // assume that the oram size < 2^48
   using UidType = typename Indexer::UidType;  // type of the unique identifier
   using OPosMapEntry = GenericOPosMapEntry<K, V, H, PositionType>;
+  static constexpr bool isOblivious = obliLevel != NON_OBLIVIOUS;
   static constexpr bool isObliviousPosMap = isOblivious;
   /**
    * @brief A stash storing position map entries that cannot be stored in the
@@ -419,14 +422,90 @@ struct OPosMap {
   using BucketType = OPosMapBucket<bucketSize, K, V, H, PositionType>;
   // for oblivious hash map, we use recursive ORAM
   using ObliviousTableType = RecursiveORAM<BucketType, PositionType>;
-  // for non-oblivious hash map, we cache the front of the vector, for the
-  // remaining data store it encrypted and authenticated in external memory,
-  // check freshness when swapped in.
+
+  //  for non-oblivious hash map, we cache the front of the vector, for the
+  //  remaining data store it encrypted and authenticated in external memory,
+  //  check freshness when swapped in.
   using NonObliviousTableType = EM::CacheFrontVector::Vector<
       BucketType, sizeof(BucketType),
       EM::CacheFrontVector::EncryptType::ENCRYPT_AND_AUTH_FRESH, 1024>;
-  using TableType = std::conditional_t<isOblivious, ObliviousTableType,
-                                       NonObliviousTableType>;
+
+  struct PageObliviousTableType {
+    using PageObliviousExternalType = PageORAM<BucketType, PositionType>;
+    using PageObliviousInternalType = NonObliviousTableType;
+    void* table = nullptr;
+    bool IsExternal;
+
+    void SetSize(PositionType size, uint64_t cacheBytes) {
+      if (PageObliviousInternalType::IsInMemory(size, cacheBytes)) {
+        IsExternal = false;
+        table = new PageObliviousInternalType(size);
+      } else {
+        IsExternal = true;
+        table = new PageObliviousExternalType(size);
+      }
+    }
+
+    void Access(PositionType addr, const auto& updateFunc) {
+      if (IsExternal) {
+        auto* externalTable = static_cast<PageObliviousExternalType*>(table);
+        externalTable->Access(addr, updateFunc);
+      } else {
+        auto* internalTable = static_cast<PageObliviousInternalType*>(table);
+        updateFunc((*internalTable)[addr]);
+      }
+    }
+
+    void InitDefault(const BucketType& defaultBucket) {
+      if (IsExternal) {
+        auto* externalTable = static_cast<PageObliviousExternalType*>(table);
+        externalTable->InitDefault(defaultBucket);
+      } else {
+        auto* internalTable = static_cast<PageObliviousInternalType*>(table);
+        internalTable->InitDefault(defaultBucket);
+      }
+    }
+
+    template <typename Reader>
+    void InitFromReader(Reader& reader) {
+      if (IsExternal) {
+        auto* externalTable = static_cast<PageObliviousExternalType*>(table);
+        externalTable->InitFromReader(reader);
+      } else {
+        auto* internalTable = static_cast<PageObliviousInternalType*>(table);
+        internalTable->InitFromReader(reader);
+      }
+    }
+
+    uint64_t GetMemoryUsage() const {
+      if (IsExternal) {
+        auto* externalTable = static_cast<PageObliviousExternalType*>(table);
+        return externalTable->GetMemoryUsage();
+      } else {
+        auto* internalTable = static_cast<PageObliviousInternalType*>(table);
+        return internalTable->GetMemoryUsage();
+      }
+    }
+
+    void PauseWorkers() {}
+
+    void ResumeWorkers() {}
+
+    ~PageObliviousTableType() {
+      if (IsExternal) {
+        auto* externalTable = static_cast<PageObliviousExternalType*>(table);
+        delete externalTable;
+      } else {
+        auto* internalTable = static_cast<PageObliviousInternalType*>(table);
+        delete internalTable;
+      }
+    }
+  };
+
+  using TableType = std::conditional_t<
+      obliLevel == FULL_OBLIVIOUS, ObliviousTableType,
+      std::conditional_t<obliLevel == PAGE_OBLIVIOUS, PageObliviousTableType,
+                         NonObliviousTableType>>;
   // the two hash tables
   TableType table0, table1;
   // the indexer to hash the key
@@ -907,7 +986,7 @@ struct OPosMap {
 
   const StashType& GetStash() const { return stash; }
 
-  using NonObliviousPosMap = OPosMap<K, V, false, true>;
+  using NonObliviousPosMap = OPosMap<K, V, NON_OBLIVIOUS, true>;
 
   /**
    * @brief Initialize the oblivious position map from another non-oblivious
@@ -1320,9 +1399,178 @@ struct OPosMap {
 
 };  // class OPosMap
 
-template <typename K, typename V, typename PositionType = uint64_t>
+template <typename ORAMEntry, typename PositionType = uint64_t,
+          typename UidType = uint64_t,
+          const ObliviousLevel obliLevel = FULL_OBLIVIOUS>
+struct MainORAM {
+  using CircuitORAMInternal =
+      CircuitORAM::ORAM<ORAMEntry, 2, 20, PositionType, UidType, 4096, false>;
+  using CircuitORAMExternal =
+      CircuitORAM::ORAM<ORAMEntry, 2, 20, PositionType, UidType, 4096, true>;
+  using PageORAMExternal =
+      PageORAM<ORAMEntry, UidType, PositionType, false, 4096>;
+
+  enum ORAMType {
+    CIRCUIT_ORAM_INTERNAL,
+    CIRCUIT_ORAM_EXTERNAL,
+    PAGE_ORAM,
+    UNSET
+  };
+
+  void* oramPtr = nullptr;
+  ORAMType oramType = UNSET;
+
+  void SetSize(PositionType size) {
+    oramType = CIRCUIT_ORAM_INTERNAL;
+    initOram(size);
+  }
+
+  void SetSize(PositionType size, uint64_t cacheBytes) {
+    if (CircuitORAMInternal::GetMemoryUsage(size, cacheBytes) < cacheBytes) {
+      oramType = CIRCUIT_ORAM_INTERNAL;
+    } else {
+      if constexpr (obliLevel == FULL_OBLIVIOUS) {
+        oramType = CIRCUIT_ORAM_EXTERNAL;
+      } else {
+        oramType = PAGE_ORAM;
+      }
+    }
+    initOram(size, cacheBytes);
+  }
+
+  template <class Func>
+    requires UpdateOrRemoveFunction<Func, ORAMEntry>
+  PositionType Update(PositionType pos, const UidType& uid, PositionType newPos,
+                      const Func& updateFunc) {
+    switch (oramType) {
+      case CIRCUIT_ORAM_INTERNAL:
+        return ((CircuitORAMInternal*)oramPtr)
+            ->Update(pos, uid, newPos, updateFunc);
+      case CIRCUIT_ORAM_EXTERNAL:
+        return ((CircuitORAMExternal*)oramPtr)
+            ->Update(pos, uid, newPos, updateFunc);
+      case PAGE_ORAM:
+        return ((PageORAMExternal*)oramPtr)
+            ->Update(pos, uid, newPos, updateFunc);
+      default:
+        throw std::runtime_error("Invalid ORAM type");
+    }
+  }
+
+  PositionType Read(PositionType pos, const UidType& uid, ORAMEntry& out,
+                    PositionType newPos) {
+    switch (oramType) {
+      case CIRCUIT_ORAM_INTERNAL:
+        return ((CircuitORAMInternal*)oramPtr)->Read(pos, uid, out, newPos);
+      case CIRCUIT_ORAM_EXTERNAL:
+        return ((CircuitORAMExternal*)oramPtr)->Read(pos, uid, out, newPos);
+      case PAGE_ORAM:
+        return ((PageORAMExternal*)oramPtr)->Read(pos, uid, out, newPos);
+      default:
+        throw std::runtime_error("Invalid ORAM type");
+    }
+  }
+
+  PositionType GetRandPos() {
+    switch (oramType) {
+      case CIRCUIT_ORAM_INTERNAL:
+        return ((CircuitORAMInternal*)oramPtr)->GetRandPos();
+      case CIRCUIT_ORAM_EXTERNAL:
+        return ((CircuitORAMExternal*)oramPtr)->GetRandPos();
+      case PAGE_ORAM:
+        return ((PageORAMExternal*)oramPtr)->GetRandPos();
+      default:
+        throw std::runtime_error("Invalid ORAM type");
+    }
+  }
+
+  void PauseWorker() {
+    switch (oramType) {
+      case CIRCUIT_ORAM_INTERNAL:
+        ((CircuitORAMInternal*)oramPtr)->PauseWorker();
+        break;
+      case CIRCUIT_ORAM_EXTERNAL:
+        ((CircuitORAMExternal*)oramPtr)->PauseWorker();
+        break;
+      case PAGE_ORAM:
+        ((PageORAMExternal*)oramPtr)->PauseWorkers();
+        break;
+      default:
+        throw std::runtime_error("Invalid ORAM type");
+    }
+  }
+
+  void ResumeWorker() {
+    switch (oramType) {
+      case CIRCUIT_ORAM_INTERNAL:
+        ((CircuitORAMInternal*)oramPtr)->ResumeWorker();
+        break;
+      case CIRCUIT_ORAM_EXTERNAL:
+        ((CircuitORAMExternal*)oramPtr)->ResumeWorker();
+        break;
+      case PAGE_ORAM:
+        ((PageORAMExternal*)oramPtr)->ResumeWorker();
+        break;
+      default:
+        throw std::runtime_error("Invalid ORAM type");
+    }
+  }
+
+  ~MainORAM() {
+    if (oramPtr == nullptr) {
+      return;
+    }
+    switch (oramType) {
+      case CIRCUIT_ORAM_INTERNAL:
+        delete (CircuitORAMInternal*)oramPtr;
+        break;
+      case CIRCUIT_ORAM_EXTERNAL:
+        delete (CircuitORAMExternal*)oramPtr;
+        break;
+      case PAGE_ORAM:
+        delete (PageORAMExternal*)oramPtr;
+        break;
+    }
+  }
+
+ private:
+  void initOram(PositionType size) {
+    switch (oramType) {
+      case CIRCUIT_ORAM_INTERNAL:
+        oramPtr = new CircuitORAMInternal(size);
+        break;
+      case CIRCUIT_ORAM_EXTERNAL:
+        oramPtr = new CircuitORAMExternal(size);
+        break;
+      case PAGE_ORAM:
+        oramPtr = new PageORAMExternal(size);
+        break;
+      default:
+        throw std::runtime_error("Invalid ORAM type");
+    }
+  }
+
+  void initOram(PositionType size, uint64_t cacheBytes) {
+    switch (oramType) {
+      case CIRCUIT_ORAM_INTERNAL:
+        oramPtr = new CircuitORAMInternal(size, cacheBytes);
+        break;
+      case CIRCUIT_ORAM_EXTERNAL:
+        oramPtr = new CircuitORAMExternal(size, cacheBytes);
+        break;
+      case PAGE_ORAM:
+        oramPtr = new PageORAMExternal(size, cacheBytes);
+        break;
+      default:
+        throw std::runtime_error("Invalid ORAM type");
+    }
+  }
+};
+
+template <typename K, typename V, typename PositionType = uint64_t,
+          const ObliviousLevel obliLevel = FULL_OBLIVIOUS>
 struct OMap {
-  using PosMapType = OPosMap<K, PositionType, true>;
+  using PosMapType = OPosMap<K, PositionType, obliLevel>;
   PosMapType keyPosMap;
   bool inited = false;
   using UidType = typename PosMapType::UidType;
@@ -1348,8 +1596,10 @@ struct OMap {
   // additional stash to put elements with duplicate
   // info in position map but has different keys
 
-  // TODO: freshness check if swap is needed
-  CircuitORAM::ORAM<ORAMEntry, 2, 20, PositionType, UidType, 4096, false> oram;
+  // CircuitORAM::ORAM<ORAMEntry, 2, 20, PositionType, UidType, 4096, false>
+  // oram;
+  // PageORAM<ORAMEntry, UidType, PositionType, false, 4096> oram;
+  MainORAM<ORAMEntry, PositionType, UidType, obliLevel> oram;
 
   OMap() {}
   OMap(PositionType size) { SetSize(size); }
@@ -1386,7 +1636,7 @@ struct OMap {
    *
    */
   struct InitContext {
-    using NonObliviousPosMap = OPosMap<K, PositionType, false, true>;
+    using NonObliviousPosMap = OPosMap<K, PositionType, NON_OBLIVIOUS, true>;
 
    private:
     NonObliviousPosMap* nonObliviousPosMap;
@@ -1506,8 +1756,8 @@ struct OMap {
 
   template <class PosMap>
   bool InsertWithCustomPosMap(const K& key, const V& value, PosMap& posMap) {
-    // first pass, check if key exists in stash, if so, replace the value and we
-    // are done
+    // first pass, check if key exists in stash, if so, replace the value and
+    // we are done
     for (StashEntry& pair : stash) {
       bool matchFlag = pair.key == key && pair.valid;
       if (matchFlag) {
@@ -1536,10 +1786,10 @@ struct OMap {
       return true;
     });
     // case 1: exist and same key -> don't change stash
-    // case 2: exist and not same key -> put to the stash (if the key exists in
-    // stash, replace, otherwise, insert)
-    // case 3: not exist -> if the key exists in stash, remove it and set exist
-    // flag to true, otherwise don't change the stash
+    // case 2: exist and not same key -> put to the stash (if the key exists
+    // in stash, replace, otherwise, insert) case 3: not exist -> if the key
+    // exists in stash, remove it and set exist flag to true, otherwise don't
+    // change the stash
 
     // second pass, insert to stash if needed
     if (insertToStashFlag) {
@@ -1581,8 +1831,8 @@ struct OMap {
     obliMove(!existInCuckoo, pos, oram.GetRandPos());
     bool existInStash = false;
 
-    // first pass, check if key exists in stash, if so, replace the value and we
-    // are done
+    // first pass, check if key exists in stash, if so, replace the value and
+    // we are done
     for (StashEntry& pair : stash) {
       bool matchFlag = pair.valid & (pair.key == key);
       obliMove(matchFlag, pair.value, value);
@@ -1600,10 +1850,10 @@ struct OMap {
       return updateKeepFlag;
     });
     // case 1: exist and same key -> don't change stash
-    // case 2: exist and not same key -> put to the stash (if the key exists in
-    // stash, replace, otherwise, insert)
-    // case 3: not exist -> if the key exists in stash, remove it and set exist
-    // flag to true, otherwise don't change the stash
+    // case 2: exist and not same key -> put to the stash (if the key exists
+    // in stash, replace, otherwise, insert) case 3: not exist -> if the key
+    // exists in stash, remove it and set exist flag to true, otherwise don't
+    // change the stash
 
     // second pass, insert to stash if needed
     for (StashEntry& pair : stash) {
@@ -1658,13 +1908,13 @@ struct OMap {
   }
 
   /**
-   * @brief Erase a key from the map. The function is not oblivious and reveals
-   * whether the key exists in the map. The function is faster than OErase and
-   * should be used when the database is public.
+   * @brief Erase a key from the map. The function is not oblivious and
+   * reveals whether the key exists in the map. The function is faster than
+   * OErase and should be used when the database is public.
    *
    * @param key the key to erase
-   * @return true if there is an entry in the position map that matches the key,
-   * false otherwise
+   * @return true if there is an entry in the position map that matches the
+   * key, false otherwise
    */
   bool Erase(const K& key) {
     PositionType newPos = oram.GetRandPos();  // possibly the erasure is dummy
@@ -1699,8 +1949,8 @@ struct OMap {
    * @brief Erase a key from the map. The function is oblivious.
    *
    * @param key the key to erase
-   * @return true if there is an entry in the position map that matches the key,
-   * false otherwise
+   * @return true if there is an entry in the position map that matches the
+   * key, false otherwise
    */
   bool OErase(const K& key) {
     PositionType newPos = oram.GetRandPos();  // possibly the erasure is dummy

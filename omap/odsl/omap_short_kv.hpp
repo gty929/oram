@@ -290,8 +290,6 @@ struct OHashMapBucket {
 #endif
 };
 
-enum ObliviousLevel { NON_OBLIVIOUS, PAGE_OBLIVIOUS, FULL_OBLIVIOUS };
-
 /**
  * @brief An cuckoo hash map built on top of either recursive ORAM or a standard
  * vector. It contains two hash tables, and a stash for elements that cannot be

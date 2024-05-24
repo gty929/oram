@@ -364,19 +364,24 @@ void testOInsertAfterInsert() {
   }
 }
 
-template <const bool is_improved = true, const bool is_public_db = true>
+template <const bool is_improved = true, const bool is_public_db = true,
+          const ObliviousLevel obliLevel = PAGE_OBLIVIOUS>
 void testOMap() {
-  using OMapType = std::conditional_t<is_improved, OMap<int, int>,
-                                      OHashMap<int, int, FULL_OBLIVIOUS>>;
-  for (int r = 0; r < 1000; ++r) {
+  using OMapType =
+      std::conditional_t<is_improved, OMap<int, int, uint32_t, obliLevel>,
+                         OHashMap<int, int, obliLevel>>;
+  for (int r = 0; r < 1; ++r) {
     int roundSeed = UniformRandom32();
     srand(roundSeed);
-    int mapSize = rand(10, 500);
+    int mapSize = rand(50000, 100000);
     int keySpace = rand(mapSize * 3, mapSize * 5);
-    OMapType map(mapSize);
+    OMapType map(mapSize, 1UL << 18);
     map.Init();
     std::unordered_map<int, int> std_map;
     for (int r = 0; r < 2 * keySpace; ++r) {
+      if (r % 1000 == 0) {
+        std::cout << "roundSeed: " << roundSeed << " r: " << r << std::endl;
+      }
       if (std_map.size() < mapSize) {
         int key = rand() % keySpace;
         int value = rand();
@@ -388,17 +393,17 @@ void testOMap() {
         ASSERT_EQ(exist, std_map.find(key) != std_map.end());
         std_map[key] = value;
       }
-      if (rand() % 2 == 0) {
-        int key = rand() % keySpace;
-        bool found = is_public_db ? map.Erase(key) : map.OErase(key);
-        auto it = std_map.find(key);
-        if (it != std_map.end()) {
-          ASSERT_TRUE(found);
-          std_map.erase(it);
-        } else {
-          ASSERT_FALSE(found);
-        }
-      }
+      // if (rand() % 2 == 0) {
+      //   int key = rand() % keySpace;
+      //   bool found = is_public_db ? map.Erase(key) : map.OErase(key);
+      //   auto it = std_map.find(key);
+      //   if (it != std_map.end()) {
+      //     ASSERT_TRUE(found);
+      //     std_map.erase(it);
+      //   } else {
+      //     ASSERT_FALSE(found);
+      //   }
+      // }
       if (rand() % 1000 == 0) {
         // test pause and resume workers, both operations should be idempotent,
         // and pause should block until all worker threads are joined

@@ -16,6 +16,8 @@
 
 namespace ODSL {
 
+enum ObliviousLevel { NON_OBLIVIOUS, PAGE_OBLIVIOUS, FULL_OBLIVIOUS };
+
 /**
  * @brief An update or remove function should be able to update an object of
  * type T and return a boolean value indicating whether the object should be

@@ -259,6 +259,10 @@ struct Vector {
     }
   }
 
+  static bool IsInMemory(uint64_t N, uint64_t cacheBytes) {
+    return N <= transformCacheBytesToCacheSize(N, cacheBytes);
+  }
+
   struct Reader {
     using value_type = T;
     using iterator_type = Iterator;

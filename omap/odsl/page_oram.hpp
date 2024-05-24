@@ -16,14 +16,15 @@ struct Page {
   T data[item_per_page];
   using Encrypted_t = FreshEncrypted<Page>;
   Page() {
-    for (UidType i = 0; i < item_per_page; i++) {
+    for (uint64_t i = 0; i < item_per_page; i++) {
       uids[i] = DUMMY<UidType>();
     }
   }
 };
 
 template <typename T, typename UidType = uint64_t,
-          typename PageIdxType = uint32_t, const uint64_t page_size = 4096>
+          typename PageIdxType = uint32_t, const bool includePosMap = true,
+          const uint64_t page_size = 4096>
 struct PageORAM {
   using Page_ = Page<T, UidType, page_size>;
   using FrontEndType = EM::MemoryServer::NonCachedServerFrontendInstance<
@@ -37,17 +38,17 @@ struct PageORAM {
   struct LinkedNode {
     T data;
     UidType uid;
-    UidType nextNodeIdx;
+    uint64_t nextNodeIdx;
   };
   std::vector<LinkedNode> stash;  // A fairly large stash
   // Each page can have a linked list of nodes
   // Since the size of each node is the same, we avoid using malloc. Instead, we
   // manage the free list by ourself. After eviction, we add the head of the
   // linked list to the free list.
-  UidType freeListHead, freeListTail;
-  static constexpr UidType listEnd = DUMMY<UidType>();
+  uint64_t freeListHead, freeListTail;
+  static constexpr uint64_t listEnd = DUMMY<uint64_t>();
   PageIdxType numPages;
-  std::vector<UidType> pageLists;
+  std::vector<uint64_t> pageLists;
   FrontEndType frontend;
   T defaultVal = T();
 
@@ -55,19 +56,27 @@ struct PageORAM {
   PageORAM(BackendType& _backend = *::EM::Backend::g_DefaultBackend)
       : frontend(_backend) {}
 
-  PageORAM(UidType size,
+  PageORAM(uint64_t size,
            BackendType& _backend = *::EM::Backend::g_DefaultBackend)
       : frontend(_backend) {
     SetSize(size);
   }
 
-  void SetSize(UidType size, uint64_t cacheBytes = 0) {
+  PageORAM(uint64_t size, uint64_t cacheBytes,
+           BackendType& _backend = *::EM::Backend::g_DefaultBackend)
+      : frontend(_backend) {
+    SetSize(size, cacheBytes);
+  }
+
+  void SetSize(uint64_t size, uint64_t cacheBytes = 0) {
     numPages = divRoundUp(size, item_per_page) * 1.3;
     // std::cout << "size: " << size << " numPages: " << numPages << std::endl;
     frontend.SetSize(numPages);
-    posMap.resize(size);
-    for (UidType i = 0; i < size; i++) {
-      posMap[i] = UniformRandom(numPages - 1);
+    if constexpr (includePosMap) {
+      posMap.resize(size);
+      for (uint64_t i = 0; i < size; i++) {
+        posMap[i] = UniformRandom(numPages - 1);
+      }
     }
     stash.reserve(numPages);
     stash.resize(1);
@@ -77,14 +86,79 @@ struct PageORAM {
     freeListTail = 0;
   }
 
+  PageIdxType GetRandPos() const {
+    static_assert(!includePosMap);
+    return UniformRandom(numPages - 1);
+  }
+
+  /**
+   * @brief Update a block in the ORAM and assign it to a new position
+   *
+   * @tparam Func The type of the update function. The update function should
+   * take a reference to the block and return a bool. If the return value is
+   * true, the block is kept, otherwise it is deleted.
+   * @param pos The current position of the block
+   * @param uid The unique id of the block
+   * @param newPos The new position of the block
+   * @param updateFunc The update function
+   * @return PageIdxType
+   */
+  template <class Func>
+    requires UpdateOrRemoveFunction<Func, T>
+  PageIdxType Update(PageIdxType pos, const UidType& uid, PageIdxType newPos,
+                     const Func& updateFunc) {
+    static_assert(!includePosMap);
+    Page_ page;
+    frontend.Read(pos, page);
+    // add remove
+    access(uid, updateFunc, pos, page, newPos);
+    frontend.Write(pos, page);
+    return newPos;
+  }
+
+  /**
+   * @brief Read a block from the ORAM and assign it to a new position
+   *
+   * @param pos The current position of the block
+   * @param uid The unique id of the block
+   * @param out The output block
+   * @param newPos The new position of the block
+   * @return PageIdxType The new position of the block
+   */
+  PageIdxType Read(PageIdxType pos, const UidType& uid, T& out,
+                   PageIdxType newPos) {
+    static_assert(!includePosMap);
+    auto accessor = [&](const T& data) {
+      out = data;
+      return true;
+    };
+    return Update(pos, uid, newPos, accessor);
+  }
+
   template <class Func>
     requires UpdateFunction<Func, T>
   void Access(UidType address, const Func& accessor) {
+    static_assert(includePosMap);
     PageIdxType pageIdx = posMap[address];
     Page_ page;
     frontend.Read(pageIdx, page);
-    access(address, accessor, pageIdx, page);
+    PageIdxType newPageIdx = UniformRandom(numPages - 1);
+    access(address, accessor, pageIdx, page, newPageIdx);
     frontend.Write(pageIdx, page);
+  }
+
+  void PauseWorker() {}
+
+  void ResumeWorker() {}
+
+  void PauseWorkers() {}
+
+  void ResumeWorkers() {}
+
+  uint64_t GetMemoryUsage() const {
+    return sizeof(PageORAM) + sizeof(PageIdxType) * numPages +
+           sizeof(UidType) * posMap.size() + sizeof(LinkedNode) * stash.size() +
+           sizeof(UidType) * pageLists.size();
   }
 
   /**
@@ -94,6 +168,7 @@ struct PageORAM {
    * @param out The output data
    */
   void Read(UidType address, T& out) {
+    static_assert(includePosMap);
     Access(address, [&](const T& data) { out = data; });
   }
 
@@ -104,6 +179,7 @@ struct PageORAM {
    * @param in The input data
    */
   void Write(UidType address, const T& in) {
+    static_assert(includePosMap);
     Access(address, [&](T& data) { data = in; });
   }
 
@@ -111,16 +187,17 @@ struct PageORAM {
     requires Readable<Reader, T>
   void InitFromReader(Reader& reader,
                       uint64_t cacheBytes = DEFAULT_HEAP_SIZE / 5) {
+    static_assert(includePosMap);
     // first load everything to the external array
     UidType uid = 0;
-    UidType initSize = reader.size();
+    uint64_t initSize = reader.size();
     for (PageIdxType i = 0; i < numPages; i++) {
       if (reader.eof()) {
         break;
       }
       Page_ page;
       frontend.Read(i, page);
-      for (UidType j = 0; j < item_per_page; j++) {
+      for (uint64_t j = 0; j < item_per_page; j++) {
         if (reader.eof()) {
           break;
         }
@@ -131,7 +208,7 @@ struct PageORAM {
     }
     EM::VirtualVector::VirtualWriter<UidBlock<T, UidType>> overflowWriter(
         initSize, [&](const uint64_t idx, const UidBlock<T, UidType>& block) {
-          UidType slot = getFreeSlot();
+          uint64_t slot = getFreeSlot();
           stash[slot].data = block.data;
           stash[slot].uid = block.uid;
           addSlotToPageList(posMap[block.uid], slot);
@@ -168,29 +245,32 @@ struct PageORAM {
   template <class Func>
     requires UpdateFunction<Func, T>
   void access(UidType address, const Func& accessor, PageIdxType pageIdx,
-              Page_& page) {
+              Page_& page, PageIdxType newPageIdx) {
     bool foundInStash = false;
     bool foundInPage = false;
-    PageIdxType newPageIdx = UniformRandom(numPages - 1);
 
     T* dataPtr = nullptr;
-    UidType* prevUidPtr = &pageLists[pageIdx];
-    UidType currIdx = *prevUidPtr;
+    UidType* addressPtr = nullptr;
+    uint64_t* prevIdxPtr = &pageLists[pageIdx];
+    uint64_t currIdx = *prevIdxPtr;
     while (currIdx != listEnd) {
       if (stash[currIdx].uid == address) {
         dataPtr = &stash[currIdx].data;
+        if constexpr (!includePosMap) {
+          addressPtr = &stash[currIdx].uid;
+        }
         // remove the node from the page linked list
-        *prevUidPtr = stash[currIdx].nextNodeIdx;
+        *prevIdxPtr = stash[currIdx].nextNodeIdx;
         // add the node to the head of the new page linked list
         addSlotToPageList(newPageIdx, currIdx);
         foundInStash = true;
         // break;
       }
-      prevUidPtr = &stash[currIdx].nextNodeIdx;
-      currIdx = *prevUidPtr;
+      prevIdxPtr = &stash[currIdx].nextNodeIdx;
+      currIdx = *prevIdxPtr;
     }
 
-    for (UidType i = 0; i < item_per_page; i++) {
+    for (uint64_t i = 0; i < item_per_page; i++) {
       if (page.uids[i] == address) {
         dataPtr = &page.data[i];
         page.uids[i] = DUMMY<UidType>();
@@ -199,38 +279,56 @@ struct PageORAM {
       }
     }
     if (!foundInStash) {
-      UidType freeSlot = getFreeSlot();
+      uint64_t freeSlot = getFreeSlot();
       stash[freeSlot].uid = address;
       const T* src = foundInPage ? dataPtr : &defaultVal;
 
       memcpy(&stash[freeSlot].data, src, sizeof(T));
 
       dataPtr = &stash[freeSlot].data;
+      if constexpr (!includePosMap) {
+        addressPtr = &stash[freeSlot].uid;
+      }
       addSlotToPageList(newPageIdx, freeSlot);
     }
 
-    accessor(*dataPtr);
-
+    bool keepFlag = true;
     // Write back and maintainence
-
-    posMap[address] = newPageIdx;
+    if constexpr (includePosMap) {
+      accessor(*dataPtr);
+      posMap[address] = newPageIdx;
+    } else {
+      keepFlag = accessor(*dataPtr);
+      if (!keepFlag) {
+        *addressPtr = DUMMY<UidType>();
+        // first set the data to dummy
+      }
+    }
 
     uint32_t freeSlotIndices[item_per_page];
     uint32_t numFreeSlots = 0;
-    for (UidType i = 0; i < item_per_page; i++) {
+    for (uint64_t i = 0; i < item_per_page; i++) {
       if (page.uids[i] == DUMMY<UidType>()) {
         freeSlotIndices[numFreeSlots++] = i;
       }
     }
     // evict the data of the current page
-    UidType prev = listEnd;
-    UidType curr = pageLists[pageIdx];
-    for (UidType i = 0; i < numFreeSlots; i++) {
+    uint64_t prev = listEnd;
+    uint64_t curr = pageLists[pageIdx];
+    for (uint64_t i = 0; i < numFreeSlots; i++) {
       if (curr == listEnd) {
         break;
       }
 
       uint32_t freeSlotIdx = freeSlotIndices[i];
+      if constexpr (!includePosMap) {
+        if (stash[curr].uid == DUMMY<UidType>()) {
+          // the stash slot is dummy, skip
+          prev = curr;
+          curr = stash[curr].nextNodeIdx;
+          continue;
+        }
+      }
       page.uids[freeSlotIdx] = stash[curr].uid;
       memcpy(&page.data[freeSlotIdx], &stash[curr].data, sizeof(T));
 
@@ -248,6 +346,7 @@ struct PageORAM {
   template <class OverflowWriter>
   void partitionHelper(PageIdxType beginPageIdx, PageIdxType endPageIdx,
                        uint64_t cacheBytes, OverflowWriter& overflowWriter) {
+    static_assert(includePosMap);
     PageIdxType pageCounts = endPageIdx - beginPageIdx;
     if (pageCounts <= 1) {
       return;
@@ -294,9 +393,9 @@ struct PageORAM {
                 PageIdxType pageIdx = posMap[uid];
                 PageIdxType partitionIdx =
                     (pageIdx - beginPageIdx) / partitionSize;
-                UidType partitionMaxSize = (stepEndIndices[partitionIdx] -
-                                            stepBeginIndices[partitionIdx]) *
-                                           item_per_page;
+                uint64_t partitionMaxSize = (stepEndIndices[partitionIdx] -
+                                             stepBeginIndices[partitionIdx]) *
+                                            item_per_page;
                 // printf("partitionIdx: %u, partitionMaxSize: %lu\n",
                 //        partitionIdx, partitionMaxSize);
                 if (partitions[partitionIdx].size() < partitionMaxSize) {
@@ -311,7 +410,7 @@ struct PageORAM {
         for (PageIdxType wayIdx = 0; wayIdx < way; wayIdx++) {
           PageIdxType stepBeginPageIdx = stepBeginIndices[wayIdx];
           PageIdxType stepEndPageIdx = stepEndIndices[wayIdx];
-          UidType wayOffset = 0;
+          uint64_t wayOffset = 0;
           for (PageIdxType j = stepBeginPageIdx; j < stepEndPageIdx; j++) {
             Page_ page = Page_();
             for (uint32_t k = 0; k < item_per_page; k++) {
@@ -337,25 +436,25 @@ struct PageORAM {
     }
   }
 
-  UidType getFreeSlot() {
+  uint64_t getFreeSlot() {
     if (freeListHead == freeListTail) {  // provision a new slot
       stash.emplace_back();
       freeListTail = stash[freeListTail].nextNodeIdx = stash.size() - 1;
       stash[freeListTail].nextNodeIdx = listEnd;
     }
-    UidType slot = freeListHead;
+    uint64_t slot = freeListHead;
     freeListHead = stash[slot].nextNodeIdx;
     return slot;
   }
 
-  void addSlotToPageList(PageIdxType pageIdx, UidType slot) {
+  void addSlotToPageList(PageIdxType pageIdx, uint64_t slot) {
     stash[slot].nextNodeIdx = pageLists[pageIdx];
     pageLists[pageIdx] = slot;
   }
 
   void printFreeList() {
     printf("Free list: ");
-    UidType curr = freeListHead;
+    uint64_t curr = freeListHead;
     while (curr != listEnd) {
       printf("%lu ", curr);
       curr = stash[curr].nextNodeIdx;
