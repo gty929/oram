@@ -1007,11 +1007,13 @@ void testParOMapPerfDeferWriteBack(size_t mapSize = 5e6,
   ocall_measure_time(&end);
   uint64_t initTimediff = end - start;
   for (uint32_t batchSize :
-       {100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000}) {
+       {100, 1024, 4096}) {
+      //  {100, 1024, 4096, 8192, 16384, 65536}) {
     printf("mapSize = %u, threadCount = %d, batchSize = %u\n", mapSize,
            threadCount, batchSize);
     printf("oram init time %f s\n", (double)initTimediff * 1e-9);
-    int round = 1e6;
+    int round = 1e4;
+    int realCount = (round / batchSize) * batchSize;
     uint64_t queryTimediff = 0;
 
     ocall_measure_time(&start);
@@ -1029,9 +1031,9 @@ void testParOMapPerfDeferWriteBack(size_t mapSize = 5e6,
     ocall_measure_time(&end);
     uint64_t timediff = end - start;
     printf("oram find time %f us\n",
-           (double)queryTimediff * 1e-3 / (double)round);
+           (double)queryTimediff * 1e-3 / (double)realCount);
     printf("oram find and evict time %f us\n",
-           (double)timediff * 1e-3 / (double)round);
+           (double)timediff * 1e-3 / (double)realCount);
   }
 }
 
@@ -1080,15 +1082,15 @@ void testParOMapPerfDiffCond() {
   if (EM::Backend::g_DefaultBackend) {
     delete EM::Backend::g_DefaultBackend;
   }
-  size_t BackendSize = 1e10;
+  size_t BackendSize = 1ULL * (1<<30);
   EM::Backend::g_DefaultBackend =
       new EM::Backend::MemServerBackend(BackendSize);
   for (uint32_t mapSize :
        {1e5, 2e5, 5e5, 1e6, 2e6, 5e6, 1e7, 2e7, 5e7, 1e8, 2e8, 5e8, 1e9}) {
-    for (int threadCount : {2, 4, 8, 16, 32}) {
+    for (int threadCount : {30}) {
       try {
-        testParOMapPerf(mapSize, threadCount);
-        // testParOMapPerfDeferWriteBack(mapSize, threadCount);
+        // testParOMapPerf(mapSize, threadCount);
+        testParOMapPerfDeferWriteBack(mapSize, threadCount);
         // testParOMapPerfSignal(mapSize, threadCount);
       } catch (const std::runtime_error& e) {
         printf("Caught a runtime_error: %s\n", e.what());
@@ -1134,12 +1136,13 @@ void ecall_omap_perf() {
   if (EM::Backend::g_DefaultBackend) {
     delete EM::Backend::g_DefaultBackend;
   }
-  size_t BackendSize = 4e9;
+  size_t BackendSize = 4 * (1ULL<<30ULL);
   EM::Backend::g_DefaultBackend =
       new EM::Backend::MemServerBackend(BackendSize);
+  
   try {
     // testOmpSpeedup();
-    // testParOMapPerfDiffCond();
+    testParOMapPerfDiffCond();
     // testParOMapPerf(5e6, 2);
     // testParOMapPerfDeferWriteBack(5e6, 32);
     // testOHashMapPerf();
@@ -1148,7 +1151,7 @@ void ecall_omap_perf() {
     // testOHashMapPerfDiffCond();
     // testRecursiveORAMPerf();
 
-    testOHashMapImproved();
+    // testOHashMapImproved();
     // testPageOMap();
     // printf("heap used %lu\n", g_peak_heap_used);
     // testOMapBatchAccess();
@@ -1157,5 +1160,6 @@ void ecall_omap_perf() {
   } catch (std::exception& e) {
     printf("exception: %s\n", e.what());
   }
+
   return;
 }
